@@ -1,557 +1,186 @@
-import type { Skin } from "./types";
+import type { Skin } from './types';
+
+export interface DetectionBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 export interface DetectionResult {
-  boxes: Array<{
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  }>;
+  boxes: DetectionBox[];
+  columns: number;
+  rows: number;
+  confidence: number;
 }
 
-export function loadImage(
-  file: File
-): Promise<HTMLImageElement> {
-  return new Promise(
-    (resolve, reject) => {
-      const url =
-        URL.createObjectURL(file);
-
-      const image =
-        new Image();
-
-      image.onload = () => {
-        URL.revokeObjectURL(url);
-        resolve(image);
-      };
-
-      image.onerror = () => {
-        URL.revokeObjectURL(url);
-
-        reject(
-          new Error(
-            `Could not load ${file.name}`
-          )
-        );
-      };
-
-      image.src = url;
-    }
-  );
+export function loadImage(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.decoding = 'async';
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error(`Could not load image: ${file.name}`));
+    };
+    image.src = url;
+  });
 }
 
-/*
- * Basic computer-vision style detector.
- *
- * MLBB screenshot grids normally contain repeated
- * rectangular image/card regions. This scans the
- * screenshot for high-information rectangular
- * areas and groups nearby candidates.
- *
- * The detector intentionally runs entirely in the
- * browser so user screenshots do not need to be
- * uploaded to a server.
- */
-export async function detectScreenshot(
-  image: HTMLImageElement,
-  onProgress?: (
-    progress: number
-  ) => void
-): Promise<DetectionResult> {
-  const maxDimension = 1800;
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
 
-  const scale =
-    Math.min(
-      1,
-      maxDimension /
-        Math.max(
-          image.naturalWidth,
-          image.naturalHeight
-        )
-    );
-
-  const width =
-    Math.max(
-      1,
-      Math.round(
-        image.naturalWidth * scale
-      )
-    );
-
-  const height =
-    Math.max(
-      1,
-      Math.round(
-        image.naturalHeight * scale
-      )
-    );
-
-  const canvas =
-    document.createElement("canvas");
-
-  canvas.width = width;
-  canvas.height = height;
-
-  const context =
-    canvas.getContext("2d", {
-      willReadFrequently: true,
-    });
-
-  if (!context) {
-    throw new Error(
-      "Canvas is not supported."
-    );
-  }
-
-  context.drawImage(
-    image,
-    0,
-    0,
-    width,
-    height
-  );
-
-  const data =
-    context.getImageData(
-      0,
-      0,
-      width,
-      height
-    ).data;
-
-  /*
-   * Determine an approximate background color.
-   */
-  const sampleStep =
-    Math.max(
-      4,
-      Math.floor(
-        Math.min(width, height) /
-          100
-      )
-    );
-
-  let totalR = 0;
-  let totalG = 0;
-  let totalB = 0;
+function scoreCell(data: Uint8ClampedArray, width: number, height: number): number {
+  const stepX = Math.max(1, Math.floor(width / 12));
+  const stepY = Math.max(1, Math.floor(height / 12));
   let samples = 0;
+  let sum = 0;
+  let sumSq = 0;
 
-  for (
-    let y = 0;
-    y < height;
-    y += sampleStep
-  ) {
-    for (
-      let x = 0;
-      x < width;
-      x += sampleStep
-    ) {
-      const index =
-        (y * width + x) * 4;
-
-      totalR += data[index];
-      totalG += data[index + 1];
-      totalB += data[index + 2];
-
+  for (let y = Math.floor(stepY / 2); y < height; y += stepY) {
+    for (let x = Math.floor(stepX / 2); x < width; x += stepX) {
+      const i = (y * width + x) * 4;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      sum += luminance;
+      sumSq += luminance * luminance;
       samples++;
     }
-
-    if (
-      onProgress &&
-      y % Math.max(1, Math.floor(height / 20)) === 0
-    ) {
-      onProgress(
-        Math.round(
-          (y / height) * 35
-        )
-      );
-
-      await new Promise(
-        (resolve) =>
-          requestAnimationFrame(
-            () => resolve(null)
-          )
-      );
-    }
   }
 
-  const average = {
-    r: totalR / Math.max(1, samples),
-    g: totalG / Math.max(1, samples),
-    b: totalB / Math.max(1, samples),
-  };
+  if (!samples) return 0;
+  const mean = sum / samples;
+  const variance = Math.max(0, sumSq / samples - mean * mean);
+  return Math.sqrt(variance);
+}
 
-  /*
-   * Estimate likely grid cell dimensions.
-   *
-   * MLBB collection screenshots commonly have
-   * several cards horizontally.
-   */
-  const possibleColumns = [
-    3,
-    4,
-    5,
-    6,
-    7,
-    8,
-    9,
-    10,
-  ];
-
-  let bestColumns = 5;
-  let bestScore = Infinity;
-
-  for (
-    const candidate of possibleColumns
-  ) {
-    const cellWidth =
-      width / candidate;
-
-    const score =
-      Math.abs(
-        cellWidth /
-          Math.max(1, height) -
-          0.16
-      );
-
-    if (score < bestScore) {
-      bestScore = score;
-      bestColumns =
-        candidate;
-    }
+export async function detectScreenshot(
+  image: HTMLImageElement,
+  onProgress?: (progress: number) => void,
+): Promise<DetectionResult> {
+  if (!image.naturalWidth || !image.naturalHeight) {
+    throw new Error('Image is not loaded.');
   }
 
-  onProgress?.(45);
+  onProgress?.(5);
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
-  const approximateCellWidth =
-    width / bestColumns;
+  const maxDimension = 1800;
+  const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
 
-  const approximateCellHeight =
-    approximateCellWidth * 1.25;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('Your browser could not create a detection canvas.');
 
-  const boxes: DetectionResult["boxes"] =
-    [];
+  ctx.drawImage(image, 0, 0, width, height);
+  const pixels = ctx.getImageData(0, 0, width, height);
+  onProgress?.(20);
 
-  /*
-   * Scan likely grid positions.
-   */
-  const rows =
-    Math.ceil(
-      height /
-        Math.max(
-          1,
-          approximateCellHeight
-        )
-    );
+  const candidates = [3, 4, 5, 6, 7, 8, 9, 10];
+  let best: { boxes: DetectionBox[]; columns: number; rows: number; confidence: number } | null = null;
 
-  for (
-    let row = 0;
-    row < rows;
-    row++
-  ) {
-    for (
-      let column = 0;
-      column < bestColumns;
-      column++
-    ) {
-      const x =
-        Math.round(
-          column *
-            approximateCellWidth
-        );
+  for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+    const columns = candidates[candidateIndex];
+    const aspect = 0.72;
+    const cellWidth = width / columns;
+    const estimatedCellHeight = cellWidth / aspect;
+    const rows = Math.max(1, Math.round(height / estimatedCellHeight));
+    const cellHeight = height / rows;
 
-      const y =
-        Math.round(
-          row *
-            approximateCellHeight
-        );
-
-      const w =
-        Math.round(
-          approximateCellWidth
-        );
-
-      const h =
-        Math.round(
-          approximateCellHeight
-        );
-
-      if (
-        x + w > width ||
-        y + h > height
-      ) {
-        continue;
-      }
-
-      /*
-       * Measure color variation inside
-       * the candidate cell.
-       */
-      let variance = 0;
-      let count = 0;
-
-      const stepX =
-        Math.max(
-          2,
-          Math.floor(w / 12)
-        );
-
-      const stepY =
-        Math.max(
-          2,
-          Math.floor(h / 12)
-        );
-
-      for (
-        let py = y;
-        py < y + h;
-        py += stepY
-      ) {
-        for (
-          let px = x;
-          px < x + w;
-          px += stepX
-        ) {
-          const index =
-            (py * width + px) * 4;
-
-          const r =
-            data[index];
-
-          const g =
-            data[index + 1];
-
-          const b =
-            data[index + 2];
-
-          const distance =
-            Math.abs(
-              r - average.r
-            ) +
-            Math.abs(
-              g - average.g
-            ) +
-            Math.abs(
-              b - average.b
-            );
-
-          variance += distance;
-          count++;
-        }
-      }
-
-      const score =
-        variance /
-        Math.max(1, count);
-
-      /*
-       * Reject cells that look almost exactly
-       * like the overall background.
-       */
-      if (score > 25) {
-        boxes.push({
-          x,
-          y,
-          width: w,
-          height: h,
-        });
-      }
-
-      const progress =
-        45 +
-        Math.round(
-          (
-            (row * bestColumns +
-              column) /
-            Math.max(
-              1,
-              rows * bestColumns
-            )
-          ) *
-            50
-        );
-
-      onProgress?.(
-        Math.min(95, progress)
-      );
-
-      /*
-       * Yield periodically so mobile devices
-       * remain responsive.
-       */
-      if (
-        (row * bestColumns +
-          column) %
-          8 ===
-        0
-      ) {
-        await new Promise(
-          (resolve) =>
-            requestAnimationFrame(
-              () => resolve(null)
-            )
-        );
+    const scores: number[] = [];
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < columns; col++) {
+        const x0 = Math.floor(col * cellWidth);
+        const y0 = Math.floor(row * cellHeight);
+        const x1 = Math.floor((col + 1) * cellWidth);
+        const y1 = Math.floor((row + 1) * cellHeight);
+        const cw = Math.max(1, x1 - x0);
+        const ch = Math.max(1, y1 - y0);
+        const sample = ctx.getImageData(x0, y0, cw, ch).data;
+        scores.push(scoreCell(sample, cw, ch));
       }
     }
-  }
 
-  onProgress?.(100);
+    const sorted = [...scores].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)] ?? 0;
+    const threshold = Math.max(10, median * 0.72);
+    const boxes: DetectionBox[] = [];
 
-  /*
-   * If the heuristic was too aggressive,
-   * provide a sensible fallback grid.
-   */
-  if (boxes.length === 0) {
-    const fallbackColumns =
-      5;
-
-    const fallbackWidth =
-      width / fallbackColumns;
-
-    const fallbackHeight =
-      fallbackWidth * 1.25;
-
-    const fallbackRows =
-      Math.ceil(
-        height /
-          fallbackHeight
-      );
-
-    for (
-      let row = 0;
-      row < fallbackRows;
-      row++
-    ) {
-      for (
-        let column = 0;
-        column < fallbackColumns;
-        column++
-      ) {
-        const x =
-          Math.round(
-            column *
-              fallbackWidth
-          );
-
-        const y =
-          Math.round(
-            row *
-              fallbackHeight
-          );
-
-        if (
-          x + fallbackWidth <=
-            width &&
-          y + fallbackHeight <=
-            height
-        ) {
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < columns; col++) {
+        const score = scores[row * columns + col];
+        if (score >= threshold) {
           boxes.push({
-            x,
-            y,
-            width:
-              Math.round(
-                fallbackWidth
-              ),
-            height:
-              Math.round(
-                fallbackHeight
-              ),
+            x: Math.round((col * width / columns) / scale),
+            y: Math.round((row * height / rows) / scale),
+            width: Math.round((width / columns) / scale),
+            height: Math.round((height / rows) / scale),
           });
         }
       }
     }
+
+    const fill = boxes.length / Math.max(1, rows * columns);
+    const shapeScore = 1 - Math.min(1, Math.abs((cellWidth / cellHeight) - aspect) / aspect);
+    const confidence = Math.max(0, Math.min(1, 0.55 * fill + 0.45 * shapeScore));
+
+    if (!best || Math.abs(fill - 0.5) < Math.abs((best.boxes.length / Math.max(1, best.rows * best.columns)) - 0.5)) {
+      best = { boxes, columns, rows, confidence };
+    }
+
+    onProgress?.(20 + ((candidateIndex + 1) / candidates.length) * 65);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
   }
 
-  /*
-   * Convert detector coordinates back to
-   * original screenshot resolution.
-   */
-  return {
-    boxes: boxes.map(
-      (box) => ({
-        x:
-          Math.round(
-            box.x / scale
-          ),
-        y:
-          Math.round(
-            box.y / scale
-          ),
-        width:
-          Math.round(
-            box.width / scale
-          ),
-        height:
-          Math.round(
-            box.height / scale
-          ),
-      })
-    ),
-  };
+  if (!best || best.boxes.length === 0) {
+    const columns = 5;
+    const rows = Math.max(1, Math.round(image.naturalHeight / (image.naturalWidth / columns / 0.72)));
+    const boxes: DetectionBox[] = [];
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < columns; col++) {
+        boxes.push({
+          x: Math.round(col * image.naturalWidth / columns),
+          y: Math.round(row * image.naturalHeight / rows),
+          width: Math.round(image.naturalWidth / columns),
+          height: Math.round(image.naturalHeight / rows),
+        });
+      }
+    }
+    best = { boxes, columns, rows, confidence: 0.15 };
+  }
+
+  onProgress?.(100);
+  return best;
 }
 
-export function makeSkins(
-  image: HTMLImageElement,
-  detection: DetectionResult
-): Skin[] {
-  return detection.boxes.map(
-    (box, index) => {
-      const cropCanvas =
-        document.createElement(
-          "canvas"
-        );
+export function makeSkins(image: HTMLImageElement, detection: DetectionResult, sourceName = 'MLBB screenshot'): Skin[] {
+  return detection.boxes.map((box, index) => {
+    const x = clamp(Math.floor(box.x), 0, Math.max(0, image.naturalWidth - 1));
+    const y = clamp(Math.floor(box.y), 0, Math.max(0, image.naturalHeight - 1));
+    const sw = clamp(Math.floor(box.width), 1, image.naturalWidth - x);
+    const sh = clamp(Math.floor(box.height), 1, image.naturalHeight - y);
 
-      cropCanvas.width =
-        Math.max(
-          1,
-          box.width
-        );
-
-      cropCanvas.height =
-        Math.max(
-          1,
-          box.height
-        );
-
-      const context =
-        cropCanvas.getContext(
-          "2d"
-        );
-
-      if (context) {
-        context.drawImage(
-          image,
-          box.x,
-          box.y,
-          box.width,
-          box.height,
-          0,
-          0,
-          box.width,
-          box.height
-        );
-      }
-
-      const cropped =
-        new Image();
-
-      cropped.src =
-        cropCanvas.toDataURL(
-          "image/png"
-        );
-
-      return {
-        id: `skin-${Date.now()}-${index}-${Math.random()
-          .toString(36)
-          .slice(2)}`,
-
-        image: cropped,
-
-        sx: 0,
-        sy: 0,
-
-        order: index,
-      };
-    }
-  );
-      }
+    return {
+      id: `skin-${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`,
+      sourceId: 'uploaded-screenshot',
+      sourceName,
+      image,
+      sx: x,
+      sy: y,
+      sw,
+      sh,
+      order: index,
+    };
+  });
+}
