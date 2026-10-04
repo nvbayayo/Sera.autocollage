@@ -1,10 +1,14 @@
-export type ExportFormat = "png" | "jpeg" | "webp";
+export type ExportFormat = 'png' | 'jpeg' | 'webp';
 
 export interface Skin {
   id: string;
+  sourceId: string;
+  sourceName: string;
   image: HTMLImageElement;
   sx: number;
   sy: number;
+  sw: number;
+  sh: number;
   order: number;
 }
 
