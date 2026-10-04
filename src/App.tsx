@@ -1,152 +1,818 @@
-import { useMemo, useRef, useState } from "react";
-import { Download, Upload, ArrowLeftRight, Trash2, GripVertical, RotateCcw, Image as ImageIcon, Sparkles } from "lucide-react";
+import {
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type DragEvent,
+} from "react";
+
+import {
+  Download,
+  Upload,
+  ArrowLeftRight,
+  Trash2,
+  GripVertical,
+  RotateCcw,
+  Image as ImageIcon,
+  Sparkles,
+} from "lucide-react";
+
 import { detectScreenshot, loadImage, makeSkins } from "./image";
 import { downloadBlob, exportCollage } from "./export";
-import { Skin } from "./types";
+import type { ExportFormat, Skin } from "./types";
 
-const PRESETS=[2048,3840,7680,10240,16000];
+const PRESETS = [2048, 3840, 7680, 10240, 16000];
 
-export default function App(){
-  const input=useRef<HTMLInputElement>(null);
-  const [skins,setSkins]=useState<Skin[]>([]);
-  const [busy,setBusy]=useState(false);
-  const [progress,setProgress]=useState(0);
-  const [message,setMessage]=useState("Upload one or more MLBB screenshots. Target detection: ~1–2 minutes for 400–500 skins, depending on device.");
-  const [columns,setColumns]=useState(5);
-  const [gap,setGap]=useState(12);
-  const [padding,setPadding]=useState(24);
-  const [width,setWidth]=useState(3840);
-  const [format,setFormat]=useState<"png"|"jpeg">("png");
-  const [quality,setQuality]=useState(.95);
-  const [selected,setSelected]=useState<string|null>(null);
-  const [swapId,setSwapId]=useState<string|null>(null);
-  const [dragId,setDragId]=useState<string|null>(null);
+export default function App() {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const rows=Math.ceil(skins.length/Math.max(1,columns));
+  const [skins, setSkins] = useState<Skin[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(0);
 
-  async function upload(files:FileList|null){
-    if(!files?.length)return;
-    setBusy(true);setProgress(0);setMessage("Analyzing screenshots locally…");
-    try{
-      let all:Skin[]=[]; let i=0;
-      for(const file of Array.from(files)){
-        if(!file.type.startsWith("image/"))continue;
-        const img=await loadImage(file);
-        const result=await detectScreenshot(img,file.name,`${file.name}-${i}`);
-        all=[...all,...makeSkins(result,all.length)];
-        i++;
-        setProgress(Math.round(i/Math.max(1,files.length)*100));
+  const [message, setMessage] = useState(
+    "Upload one or more MLBB screenshots. Target detection: ~1–2 minutes for 400–500 skins, depending on device."
+  );
+
+  const [columns, setColumns] = useState(5);
+  const [gap, setGap] = useState(12);
+  const [padding, setPadding] = useState(24);
+
+  const [width, setWidth] = useState(3840);
+
+  const [format, setFormat] = useState<ExportFormat>("png");
+  const [quality, setQuality] = useState(0.95);
+
+  const [selected, setSelected] = useState<string | null>(null);
+  const [swapId, setSwapId] = useState<string | null>(null);
+  const [dragId, setDragId] = useState<string | null>(null);
+
+  const rows = Math.ceil(
+    skins.length / Math.max(1, columns)
+  );
+
+  const previewSkins = useMemo(
+    () => skins.slice(0, 80),
+    [skins]
+  );
+
+  async function handleFiles(
+    event: ChangeEvent<HTMLInputElement>
+  ) {
+    const files = Array.from(event.target.files ?? []);
+
+    if (!files.length) return;
+
+    setBusy(true);
+    setProgress(0);
+    setMessage(`Processing ${files.length} screenshot(s)...`);
+
+    try {
+      const allSkins: Skin[] = [];
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+
+        if (!file.type.startsWith("image/")) {
+          continue;
+        }
+
+        setMessage(
+          `Analyzing screenshot ${i + 1} of ${files.length}: ${file.name}`
+        );
+
+        const image = await loadImage(file);
+
+        const detection = await detectScreenshot(
+          image,
+          (value: number) => {
+            const base = (i / files.length) * 100;
+            const part = value / files.length;
+
+            setProgress(
+              Math.min(100, Math.round(base + part))
+            );
+          }
+        );
+
+        const generated = makeSkins(
+          image,
+          detection
+        );
+
+        allSkins.push(...generated);
+
+        setProgress(
+          Math.round(((i + 1) / files.length) * 100)
+        );
       }
-      setSkins(all.map((s,i)=>({...s,order:i})));
-      setColumns(Math.max(1,Math.min(12,all.length ? Math.min(6, Math.ceil(Math.sqrt(all.length))) : 5)));
-      setMessage(`Detected ${all.length} image regions. You can rearrange or swap them manually.`);
-    }catch(e){
-      setMessage("Detection failed for one of the images. Try a different screenshot.");
-    }finally{setBusy(false);}
+
+      const normalized = allSkins.map(
+        (skin, index) => ({
+          ...skin,
+          order: index,
+        })
+      );
+
+      setSkins(normalized);
+
+      if (normalized.length > 0) {
+        const recommendedColumns =
+          normalized.length >= 100 ? 8 :
+          normalized.length >= 50 ? 6 :
+          5;
+
+        setColumns(recommendedColumns);
+
+        setMessage(
+          `Detected ${normalized.length} MLBB items. Automatic collage is ready.`
+        );
+      } else {
+        setMessage(
+          "No MLBB items were detected. Try a clearer screenshot."
+        );
+      }
+    } catch (error: unknown) {
+      const text =
+        error instanceof Error
+          ? error.message
+          : "Unknown error";
+
+      setMessage(`Detection failed: ${text}`);
+    } finally {
+      setBusy(false);
+      setProgress(100);
+
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
   }
 
-  function reorder(from:string,to:string){
-    setSkins(prev=>{
-      const a=[...prev], fi=a.findIndex(x=>x.id===from), ti=a.findIndex(x=>x.id===to);
-      if(fi<0||ti<0)return prev;
-      const [item]=a.splice(fi,1);a.splice(ti,0,item);
-      return a.map((s,i)=>({...s,order:i}));
+  function clearAll() {
+    setSkins([]);
+    setSelected(null);
+    setSwapId(null);
+    setDragId(null);
+    setProgress(0);
+
+    setMessage(
+      "Upload one or more MLBB screenshots. Target detection: ~1–2 minutes for 400–500 skins, depending on device."
+    );
+  }
+
+  function removeSkin(id: string) {
+    setSkins((current) =>
+      current
+        .filter((skin) => skin.id !== id)
+        .map((skin, index) => ({
+          ...skin,
+          order: index,
+        }))
+    );
+
+    if (selected === id) {
+      setSelected(null);
+    }
+
+    if (swapId === id) {
+      setSwapId(null);
+    }
+  }
+
+  function swapSkins(firstId: string, secondId: string) {
+    if (firstId === secondId) return;
+
+    setSkins((current) => {
+      const firstIndex = current.findIndex(
+        (skin) => skin.id === firstId
+      );
+
+      const secondIndex = current.findIndex(
+        (skin) => skin.id === secondId
+      );
+
+      if (
+        firstIndex === -1 ||
+        secondIndex === -1
+      ) {
+        return current;
+      }
+
+      const next = [...current];
+
+      [
+        next[firstIndex],
+        next[secondIndex],
+      ] = [
+        next[secondIndex],
+        next[firstIndex],
+      ];
+
+      return next.map((skin, index) => ({
+        ...skin,
+        order: index,
+      }));
     });
   }
-  function swap(a:string,b:string){
-    setSkins(prev=>{
-      const x=[...prev],i=x.findIndex(s=>s.id===a),j=x.findIndex(s=>s.id===b);
-      if(i<0||j<0)return prev; [x[i],x[j]]=[x[j],x[i]];
-      return x.map((s,k)=>({...s,order:k}));
-    });
+
+  function handleSwapClick(id: string) {
+    if (!swapId) {
+      setSwapId(id);
+      return;
+    }
+
+    swapSkins(swapId, id);
     setSwapId(null);
   }
-  function remove(id:string){setSkins(p=>p.filter(s=>s.id!==id).map((s,i)=>({...s,order:i})));}
 
-  async function exportNow(){
-    if(!skins.length)return;
-    setBusy(true);setMessage("Rendering full-resolution export…");
-    try{
-      const blob=await exportCollage(skins,{width,columns,gap,padding,background:"#000000",format,quality});
-      downloadBlob(blob,`mlbb-collage-${width}px.${format}`);
-      setMessage(`Export complete: ${width.toLocaleString()} px wide, ${format.toUpperCase()}.`);
-    }catch(e:any){setMessage(e?.message||"Export failed. Try a smaller resolution.");}
-    finally{setBusy(false);}
+  function handleDragStart(
+    event: DragEvent<HTMLDivElement>,
+    id: string
+  ) {
+    setDragId(id);
+
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(
+      "text/plain",
+      id
+    );
   }
 
-  const preview=useMemo(()=>skins.slice(0,80),[skins]);
+  function handleDrop(
+    event: DragEvent<HTMLDivElement>,
+    targetId: string
+  ) {
+    event.preventDefault();
 
-  return <div className="app">
-    <header>
-      <div className="brand"><div className="logo">ML</div><div><h1>Sera.autocollage</h1><span>RAW • LOSSLESS • LOCAL</span></div></div>
-      <button className="primary" onClick={()=>input.current?.click()}><Upload size={18}/> Upload screenshots</button>
-      <input ref={input} hidden type="file" accept="image/*" multiple onChange={e=>upload(e.target.files)}/>
-    </header>
+    const sourceId =
+      dragId ||
+      event.dataTransfer.getData("text/plain");
 
-    <main>
-      <section className="hero">
-        <div>
-          <p className="eyebrow">AUTOMATIC COLLECTION BUILDER</p>
-          <h2>Turn your MLBB screenshots into a clean collage.</h2>
-          <p className="sub">Automatic detection in about 1–2 minutes for 400–500 skins, depending on your device. Manual control whenever you need it. No filters, no server upload, no artificial sharpening.</p>
-        </div>
-        <div className="stats">
-          <div><b>{skins.length}</b><span>Detected</span></div>
-          <div><b>{rows}</b><span>Rows</span></div>
-          <div><b>{columns}</b><span>Columns</span></div>
-        </div>
-      </section>
+    if (!sourceId || sourceId === targetId) {
+      setDragId(null);
+      return;
+    }
 
-      <section className="workspace">
-        <aside className="panel">
-          <h3>Controls</h3>
-          <label>Export width</label>
-          <div className="presets">{PRESETS.map(p=><button className={width===p?"active":""} key={p} onClick={()=>setWidth(p)}>{p>=1000?(p/1000)+"K":p}</button>)}</div>
-          <label>Columns <b>{columns}</b></label>
-          <input type="range" min="1" max="12" value={columns} onChange={e=>setColumns(+e.target.value)}/>
-          <label>Gap <b>{gap}px</b></label>
-          <input type="range" min="0" max="60" value={gap} onChange={e=>setGap(+e.target.value)}/>
-          <label>Padding <b>{padding}px</b></label>
-          <input type="range" min="0" max="100" value={padding} onChange={e=>setPadding(+e.target.value)}/>
-          <label>Format</label>
-          <div className="format"><button className={format==="png"?"active":""} onClick={()=>setFormat("png")}>PNG lossless</button><button className={format==="jpeg"?"active":""} onClick={()=>setFormat("jpeg")}>JPEG</button></div>
-          {format==="jpeg"&&<><label>JPEG quality <b>{Math.round(quality*100)}%</b></label><input type="range" min=".7" max="1" step=".01" value={quality} onChange={e=>setQuality(+e.target.value)}/></>}
-          <button className="export" disabled={!skins.length||busy} onClick={exportNow}><Download size={18}/>{busy?"Processing…":"Export collage"}</button>
-          <button className="ghost" onClick={()=>{setSkins([]);setSelected(null);setSwapId(null);setMessage("Ready for a new upload.")}}><RotateCcw size={16}/> Clear project</button>
-        </aside>
+    setSkins((current) => {
+      const sourceIndex = current.findIndex(
+        (skin) => skin.id === sourceId
+      );
 
-        <section className="canvasArea">
-          <div className="toolbar">
-            <span>{message}</span>
-            {busy&&<span className="progress">{progress}%</span>}
-          </div>
-          {!skins.length ? <div className="drop" onClick={()=>input.current?.click()}>
-              <ImageIcon size={48}/>
-              <h3>Upload screenshots to Sera.autocollage</h3>
-              <p>Multiple screenshots supported • automatic detection • manual editing</p>
-              <button className="primary">Choose images</button>
-          </div> :
-          <div className="grid" style={{gridTemplateColumns:`repeat(${columns},minmax(0,1fr))`,gap}}>
-            {preview.map((s,i)=><div key={s.id}
-              className={"card "+(selected===s.id?"selected ":"")+(swapId===s.id?"swapTarget":"")}
-              draggable
-              onDragStart={()=>setDragId(s.id)}
-              onDragOver={e=>e.preventDefault()}
-              onDrop={()=>dragId&&dragId!==s.id&&reorder(dragId,s.id)}
-              onClick={()=>{if(swapId&&swapId!==s.id)swap(swapId,s.id);else setSelected(s.id)}}
-            >
-              <img src={s.image.src} style={{objectPosition:`${s.sx/s.image.naturalWidth*100}% ${s.sy/s.image.naturalHeight*100}%`}} />
-              <div className="cardOverlay"><GripVertical size={15}/><span>#{i+1}</span><div className="cardActions">
-                <button title="Swap" onClick={e=>{e.stopPropagation();setSwapId(swapId===s.id?null:s.id)}}><ArrowLeftRight size={14}/></button>
-                <button title="Delete" onClick={e=>{e.stopPropagation();remove(s.id)}}><Trash2 size={14}/></button>
-              </div></div>
-            </div>)}
-          </div>}
-        </section>
-      </section>
-      <footer>
-        <Sparkles size={15}/> Raw export means no filters or sharpening. PNG is lossless, but apps such as social media/messaging services may recompress images after upload.
-      </footer>
-    </main>
-  </div>
+      const targetIndex = current.findIndex(
+        (skin) => skin.id === targetId
+      );
+
+      if (
+        sourceIndex === -1 ||
+        targetIndex === -1
+      ) {
+        return current;
+      }
+
+      const next = [...current];
+
+      const [moved] = next.splice(
+        sourceIndex,
+        1
+      );
+
+      next.splice(targetIndex, 0, moved);
+
+      return next.map((skin, index) => ({
+        ...skin,
+        order: index,
+      }));
+    });
+
+    setDragId(null);
+  }
+
+  function handleDragOver(
+    event: DragEvent<HTMLDivElement>
+  ) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }
+
+  async function handleExport() {
+    if (!skins.length) {
+      setMessage(
+        "Add some MLBB screenshots before exporting."
+      );
+      return;
+    }
+
+    setBusy(true);
+    setMessage(
+      `Rendering ${width}px ${format.toUpperCase()} collage...`
+    );
+
+    try {
+      const blob = await exportCollage(
+        skins,
+        {
+          width,
+          columns,
+          gap,
+          padding,
+          background: "#000000",
+          format,
+          quality,
         }
+      );
+
+      const extension =
+        format === "jpeg"
+          ? "jpg"
+          : format;
+
+      downloadBlob(
+        blob,
+        `sera-mlbb-collage-${width}px.${extension}`
+      );
+
+      setMessage(
+        `Export complete: ${width}px ${format.toUpperCase()}.`
+      );
+    } catch (error: unknown) {
+      const text =
+        error instanceof Error
+          ? error.message
+          : "Export failed.";
+
+      setMessage(text);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function resetSettings() {
+    setColumns(5);
+    setGap(12);
+    setPadding(24);
+    setWidth(3840);
+    setFormat("png");
+    setQuality(0.95);
+
+    setMessage("Export settings reset.");
+  }
+
+  return (
+    <div className="app">
+      <header className="topbar">
+        <div className="brand">
+          <div className="brand-mark">
+            S
+          </div>
+
+          <div>
+            <div className="brand-name">
+              Sera.autocollage
+            </div>
+
+            <div className="brand-sub">
+              MLBB automatic collage maker
+            </div>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          className="upload-button"
+          onClick={() =>
+            fileInputRef.current?.click()
+          }
+          disabled={busy}
+        >
+          <Upload size={18} />
+          Upload screenshots
+        </button>
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          hidden
+          onChange={handleFiles}
+        />
+      </header>
+
+      <main>
+        <section className="hero">
+          <div className="hero-badge">
+            <Sparkles size={15} />
+            MLBB AUTO COLLAGE
+          </div>
+
+          <h1>
+            Turn your MLBB screenshots
+            <br />
+            into a clean collage.
+          </h1>
+
+          <p>
+            Upload your Mobile Legends screenshots.
+            Sera automatically detects the cards,
+            arranges them, and prepares a
+            high-resolution collage.
+          </p>
+
+          <button
+            type="button"
+            className="hero-upload"
+            onClick={() =>
+              fileInputRef.current?.click()
+            }
+            disabled={busy}
+          >
+            <Upload size={20} />
+            Choose MLBB screenshots
+          </button>
+
+          <div className="hero-note">
+            Supports multiple screenshots •
+            Automatic detection • Manual editing
+          </div>
+        </section>
+
+        <section className="stats">
+          <div className="stat">
+            <span>Detected</span>
+            <strong>{skins.length}</strong>
+          </div>
+
+          <div className="stat">
+            <span>Columns</span>
+            <strong>{columns}</strong>
+          </div>
+
+          <div className="stat">
+            <span>Rows</span>
+            <strong>{rows}</strong>
+          </div>
+
+          <div className="stat">
+            <span>Output</span>
+            <strong>
+              {width.toLocaleString()}px
+            </strong>
+          </div>
+        </section>
+
+        <section className="workspace">
+          <div className="workspace-header">
+            <div>
+              <h2>Collage workspace</h2>
+              <p>{message}</p>
+            </div>
+
+            {busy && (
+              <div className="processing">
+                <div className="spinner" />
+                <span>{progress}%</span>
+              </div>
+            )}
+          </div>
+
+          {busy && (
+            <div className="progress-track">
+              <div
+                className="progress-bar"
+                style={{
+                  width: `${progress}%`,
+                }}
+              />
+            </div>
+          )}
+
+          {skins.length === 0 ? (
+            <div className="empty-state">
+              <div className="empty-icon">
+                <ImageIcon size={36} />
+              </div>
+
+              <h3>
+                No screenshots yet
+              </h3>
+
+              <p>
+                Upload your MLBB screenshots to
+                start automatic detection.
+              </p>
+
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() =>
+                  fileInputRef.current?.click()
+                }
+                disabled={busy}
+              >
+                <Upload size={17} />
+                Upload screenshots
+              </button>
+            </div>
+          ) : (
+            <div
+              className="preview-grid"
+              style={{
+                gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+                gap: `${gap}px`,
+                padding: `${padding}px`,
+              }}
+            >
+              {previewSkins.map(
+                (skin, index) => {
+                  const isSelected =
+                    selected === skin.id;
+
+                  const isSwap =
+                    swapId === skin.id;
+
+                  return (
+                    <div
+                      key={skin.id}
+                      className={[
+                        "skin-card",
+                        isSelected
+                          ? "selected"
+                          : "",
+                        isSwap
+                          ? "swap-selected"
+                          : "",
+                      ].join(" ")}
+                      draggable
+                      onDragStart={(event) =>
+                        handleDragStart(
+                          event,
+                          skin.id
+                        )
+                      }
+                      onDragOver={
+                        handleDragOver
+                      }
+                      onDrop={(event) =>
+                        handleDrop(
+                          event,
+                          skin.id
+                        )
+                      }
+                      onClick={() =>
+                        setSelected(
+                          isSelected
+                            ? null
+                            : skin.id
+                        )
+                      }
+                    >
+                      <img
+                        src={skin.image.src}
+                        alt={`MLBB item ${index + 1}`}
+                        draggable={false}
+                      />
+
+                      <div className="skin-number">
+                        {index + 1}
+                      </div>
+
+                      <div className="skin-actions">
+                        <button
+                          type="button"
+                          title="Drag to reorder"
+                          className="icon-button drag"
+                          onClick={(event) =>
+                            event.stopPropagation()
+                          }
+                        >
+                          <GripVertical
+                            size={16}
+                          />
+                        </button>
+
+                        <button
+                          type="button"
+                          title="Select for swap"
+                          className="icon-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleSwapClick(
+                              skin.id
+                            );
+                          }}
+                        >
+                          <ArrowLeftRight
+                            size={15}
+                          />
+                        </button>
+
+                        <button
+                          type="button"
+                          title="Delete"
+                          className="icon-button danger"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            removeSkin(
+                              skin.id
+                            );
+                          }}
+                        >
+                          <Trash2
+                            size={15}
+                          />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                }
+              )}
+            </div>
+          )}
+
+          {skins.length > 80 && (
+            <div className="preview-limit">
+              Showing first 80 items in the
+              preview. All {skins.length} items
+              will be included in export.
+            </div>
+          )}
+        </section>
+
+        <section className="controls">
+          <div className="controls-header">
+            <div>
+              <h2>Export settings</h2>
+              <p>
+                Configure your final collage
+                before exporting.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              className="reset-button"
+              onClick={resetSettings}
+            >
+              <RotateCcw size={16} />
+              Reset
+            </button>
+          </div>
+
+          <div className="control-grid">
+            <div className="control">
+              <label>
+                Output width
+              </label>
+
+              <select
+                value={width}
+                onChange={(event) =>
+                  setWidth(
+                    Number(event.target.value)
+                  )
+                }
+              >
+                {PRESETS.map((preset) => (
+                  <option
+                    key={preset}
+                    value={preset}
+                  >
+                    {preset.toLocaleString()}px
+                    {" "}
+                    (
+                    {preset === 2048
+                      ? "2K"
+                      : preset === 3840
+                      ? "4K"
+                      : preset === 7680
+                      ? "8K"
+                      : preset === 10240
+                      ? "10K"
+                      : "16K"}
+                    )
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="control">
+              <label>
+                Columns
+              </label>
+
+              <input
+                type="number"
+                min={1}
+                max={20}
+                value={columns}
+                onChange={(event) =>
+                  setColumns(
+                    Math.max(
+                      1,
+                      Math.min(
+                        20,
+                        Number(
+                          event.target.value
+                        ) || 1
+                      )
+                    )
+                  )
+                }
+              />
+            </div>
+
+            <div className="control">
+              <label>
+                Gap
+              </label>
+
+              <input
+                type="number"
+                min={0}
+                max={200}
+                value={gap}
+                onChange={(event) =>
+                  setGap(
+                    Math.max(
+                      0,
+                      Number(
+                        event.target.value
+                      ) || 0
+                    )
+                  )
+                }
+              />
+            </div>
+
+            <div className="control">
+              <label>
+                Padding
+              </label>
+
+              <input
+                type="number"
+                min={0}
+                max={300}
+                value={padding}
+                onChange={(event) =>
+                  setPadding(
+                    Math.max(
+                      0,
+                      Number(
+                        event.target.value
+                      ) || 0
+                    )
+                  )
+                }
+              />
+            </div>
+
+            <div className="control">
+              <label>
+                File format
+              </label>
+
+              <select
+                value={format}
+                onChange={(event) =>
+                  setFormat(
+                    event.target
+                      .value as ExportFormat
+                  )
+                }
+              >
+                <option value="png">
+                  PNG — Lossless
+                </option>
+
+                <option value="jpeg">
+                  JPEG — Smaller
+                </option>
+
+                <option value="webp">
+                  WebP — Modern
+                </option>
+              </select>
+            </div>
+
+            {format !== "png" && (
+              <div className="control">
+                <label>
+                  Quality{" "}
+                  {Math.round(
+                    quality * 100
+                  )}
+                  %
+                </label>
+
+                <input
+                  type="range"
+                  min="0.5"
+                  max="1"
+                  step="0.01"
+                  value={quality}
+                  onChange={(event) =>
+                    setQuality(
+                      Number(
+             
