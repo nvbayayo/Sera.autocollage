@@ -239,4 +239,4 @@ export default function Home(){
       <div className="bottomActions"><button type="button" onClick={clearAll} disabled={!items.length}>Clear</button><button type="button" className="primary" onClick={exportCollage} disabled={!items.length}>Export collage</button></div>
     </div>
   </main>;
-  }
+}
