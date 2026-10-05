@@ -1,8 +1,8 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "Sera Auto Collage",
-  description: "MLBB collage editor with automatic grid detection",
+  title: "Sera Skin Collage",
+  description: "Free Mobile Legends skin collage maker"
 };
 
 export default function RootLayout({ children }) {
